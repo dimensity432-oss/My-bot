@@ -1,15 +1,34 @@
 import os
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+import telebot
+from telebot.types import BotCommand
 
-TOKEN=os.environ.get("BOT_TOKEN")
+# Fetches your token securely from the cloud dashboard
+TOKEN = os.environ.get('TOKEN')
+bot = telebot.TeleBot(TOKEN)
 
-async def start(update, context):
-    await update.message.reply_text("Bot is LIVE")
+bot.delete_webhook(drop_pending_updates=True)
 
-async def echo(update, context):
-    await update.message.reply_text(update.message.text)
+bot.set_my_commands([
+    BotCommand("start", "Start the bot"),
+    BotCommand("help", "Get usage instructions"),
+    BotCommand("status", "Check system status")
+])
 
-app=Application.builder().token(TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-app.run_polling()
+@bot.message_handler(commands=['start'])
+def send_start(message):
+    bot.reply_to(message, "👋 Welcome to @normad404! I am online and running via GitHub deployment.")
+
+@bot.message_handler(commands=['help'])
+def send_help(message):
+    bot.reply_to(message, "Commands available:\n/start - Wake up\n/help - Help menu\n/status - System status")
+
+@bot.message_handler(commands=['status'])
+def send_status(message):
+    bot.reply_to(message, "🟢 Status: Active & Listening.")
+
+@bot.message_handler(func=lambda message: True)
+def echo_all(message):
+    bot.reply_to(message, f"You said: {message.text}")
+
+print("🚀 Bot is live and polling...")
+bot.infinity_polling()
