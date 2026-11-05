@@ -1,90 +1,155 @@
+
 import os
-import telebot
-from telebot.types import BotCommand
-from google import genai
-import yt_dlp
+import time
+import secrets
+from typing import List, Optional
 
-# Load environment variables safely
-TELEGRAM_TOKEN = os.environ.get('TOKEN')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import APIKeyHeader
+from pydantic import BaseModel, Field
+from openai import OpenAI, APIError, RateLimitError
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+APP_NAME = "XENUS AI"
+APP_VERSION = "0.2.0"
 
-# Initialize the official Google GenAI client
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+XENUS_API_KEY = os.getenv("XENUS_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.5")
 
-bot.delete_webhook(drop_pending_updates=True)
+app = FastAPI(
+    title=APP_NAME,
+    version=APP_VERSION,
+    description="XENUS AI Developer API"
+)
 
-bot.set_my_commands([
-    BotCommand("start", "Start the bot"),
-    BotCommand("help", "Get usage instructions"),
-    BotCommand("status", "Check system status")
-])
+api_key_header = APIKeyHeader(
+    name="Authorization",
+    auto_error=False
+)
 
-@bot.message_handler(commands=['start'])
-def send_start(message):
-    bot.reply_to(message, "👋 Hello! I am @normad404, powered by advanced Gemini AI and media downloading tools.")
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-@bot.message_handler(commands=['help'])
-def send_help(message):
-    bot.reply_to(message, 
-        "🤖 **Advanced Bot Guide:**\n\n"
-        "1. **Smart AI Chat:** Ask me any technical, creative, or general question!\n"
-        "2. **Media Downloader:** Send any video link (YouTube, etc.) to download and receive the file directly."
-    )
 
-@bot.message_handler(commands=['status'])
-def send_status(message):
-    bot.reply_to(message, "🟢 Status: Online, connected to Gemini AI and media tools.")
+class Message(BaseModel):
+    role: str
+    content: str
 
-# Media Download Handler (YouTube & Links)
-@bot.message_handler(func=lambda message: message.text and ("http://" in message.text or "https://" in message.text))
-def handle_media_download(message):
-    url = message.text.strip()
-    bot.reply_to(message, "📥 Processing and downloading media, please wait...")
-    
-    output_filename = "downloaded_media.mp4"
-    ydl_opts = {
-        'format': 'best[ext=mp4]/best',
-        'outtmpl': output_filename,
-        'max_filesize': 50 * 1024 * 1024, # 50MB restriction for Telegram limit compliance
-    }
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-            
-        with open(output_filename, 'rb') as video_file:
-            bot.send_video(message.chat.id, video_file, caption="Here is your requested media! 🎬")
-            
-        if os.path.exists(output_filename):
-            os.remove(output_filename)
-            
-    except Exception as e:
-        bot.reply_to(message, f"❌ Download failed. The link might be restricted or exceed size limits.\nError: {str(e)}")
-        if os.path.exists(output_filename):
-            os.remove(output_filename)
 
-# Advanced AI Chat Handler (Powered by Gemini)
-@bot.message_handler(func=lambda message: True)
-def handle_ai_chat(message):
-    if not ai_client:
-        bot.reply_to(message, "⚠️ Error: GEMINI_API_KEY environment variable is missing on Render!")
-        return
-        
-    try:
-        bot.send_chat_action(message.chat.id, 'typing')
-        
-        # Using the current high-performance model endpoint
-        response = ai_client.models.generate_content(
-            model='gemini-3.8-flash',
-            contents=message.text,
+class ChatRequest(BaseModel):
+    model: Optional[str] = None
+    messages: List[Message] = Field(min_length=1)
+    temperature: Optional[float] = Field(default=0.7, ge=0, le=2)
+    max_tokens: Optional[int] = Field(default=1000, ge=1, le=4000)
+
+
+def authenticate(api_key: Optional[str] = Depends(api_key_header)):
+    if not XENUS_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="XENUS authentication is not configured"
         )
-        
-        bot.reply_to(message, response.text)
-        
-    except Exception as e:
-        bot.reply_to(message, f"⚠️ AI Error: {str(e)}")
 
-print("🚀 Advanced Telegram Bot script initialized...")
-bot.infinity_polling()
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing API key"
+        )
+
+    token = api_key.removeprefix("Bearer ").strip()
+
+    if not secrets.compare_digest(token, XENUS_API_KEY):
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid XENUS API key"
+        )
+
+    return True
+
+
+@app.get("/")
+def home():
+    return {
+        "name": APP_NAME,
+        "version": APP_VERSION,
+        "status": "online"
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "service": "XENUS",
+        "status": "healthy",
+        "version": APP_VERSION,
+        "timestamp": int(time.time())
+    }
+
+
+@app.get("/v1/models", dependencies=[Depends(authenticate)])
+def models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": OPENAI_MODEL,
+                "object": "model",
+                "owned_by": "xenus"
+            }
+        ]
+    }
+
+
+@app.post(
+    "/v1/chat/completions",
+    dependencies=[Depends(authenticate)]
+)
+def chat_completions(request: ChatRequest):
+
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI provider is not configured"
+        )
+
+    allowed_roles = {"system", "user", "assistant"}
+
+    for message in request.messages:
+        if message.role not in allowed_roles:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported message role"
+            )
+
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {
+                    "role": message.role,
+                    "content": message.content
+                }
+                for message in request.messages
+            ],
+            temperature=request.temperature,
+            max_tokens=request.max_tokens
+        )
+
+        return response.model_dump()
+
+    except RateLimitError:
+        raise HTTPException(
+            status_code=429,
+            detail="AI provider rate limit reached"
+        )
+
+    except APIError:
+        raise HTTPException(
+            status_code=502,
+            detail="XENUS AI provider request failed"
+        )
+
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="XENUS encountered an internal error"
+        )
